@@ -46,7 +46,7 @@ model = Model(Gurobi.Optimizer)
 @constraint(model, seq[i in nodes], Z[i] <= Z_bar[i])
 
 @constraint(model, force_Z_bar[i in nodes],
-    Z_bar[i] <= Z_hat + 20 * sum(y[(i,j)] for j in nodes_0 if i != j))  
+    Z_bar[i] <= T_end 
 @constraint(model, anchor_Z[i in nodes],
     Z[i] >= Z_hat * (1 - sum(y[(j,i)] for j in nodes_0 if j != i)))   
 
