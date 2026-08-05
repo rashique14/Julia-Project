@@ -6,13 +6,13 @@ Random.seed!(90)
 
 nodes   = 1:5
 nodes_0 = 0:5
-Tmax    = length(nodes) + 1          # up to 5 real visits + 1 return leg
+Tmax    = length(nodes) + 1         
 T_end   = 30.0
 U_max   = 100.0
 coords  = Dict(i => (10*rand(), 10*rand()) for i in nodes_0)
 
 A     = [(i,j) for i in nodes_0 for j in nodes_0 if i != j]
-A_ext = vcat(A, [(0,0)])             # zero-cost "parked at depot" arc
+A_ext = vcat(A, [(0,0)])            
 
 α = Dict((i,j) => hypot(coords[i][1]-coords[j][1], coords[i][2]-coords[j][2]) for (i,j) in A)
 α[(0,0)] = 0.0
