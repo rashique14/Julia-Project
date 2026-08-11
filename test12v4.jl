@@ -4,8 +4,8 @@ using Random
 
 Random.seed!(90)
 
-nodes = 1:15
-nodes_0 = 0:15
+nodes = 1:5
+nodes_0 = 0:5
 K = 4
 T_end = 30.0
 coords = Dict(i => (10*rand(), 10*rand()) for i in nodes_0)
@@ -14,7 +14,7 @@ t = Dict((i,j) => hypot(coords[i][1]-coords[j][1], coords[i][2]-coords[j][2])
          for (i,j) in A)
 M_time = 1000.0
 U_max = 100.0
-Z_hat = T_end -1
+Z_hat = T_end
 Q = Dict(i => rand(5:20) for i in nodes)
 
 model = Model(Gurobi.Optimizer)
