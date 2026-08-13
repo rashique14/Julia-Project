@@ -23,7 +23,7 @@ model = Model(Gurobi.Optimizer)
 
 @objective(model, Max, sum(Q[i] * mu[i] for i in nodes))
 
-Z_hat = T_end     
+Z_hat = T_end
 
 @constraint(model, depot_out, sum(y[(0,j)] for j in nodes) == 1)
 @constraint(model, depot_in,  sum(y[(i,0)] for i in nodes) == 1)
@@ -36,7 +36,6 @@ Z_hat = T_end
 @constraint(model, Z_bar[0] == 0)
 @constraint(model, Z[0] <= U_max)
 
-
 @constraint(model, time_link[(i,j) in A; j != 0],
     y[(i,j)] => {Z[j] >= Z_bar[i] + t[(i,j)]})
 @constraint(model, time_link_return[i in nodes],
@@ -44,9 +43,7 @@ Z_hat = T_end
 
 @constraint(model, seq[i in nodes], Z[i] <= Z_bar[i])
 
-
 @constraint(model, depart_bound[i in nodes], Z_bar[i] <= T_end)
-
 
 @constraint(model, anchor_Z[i in nodes],
     Z[i] >= Z_hat * (1 - sum(y[(j,i)] for j in nodes_0 if j != i)))
@@ -58,119 +55,94 @@ Z_hat = T_end
     mu[i] <= sum(y[(j,i)] for j in nodes_0 if j != i))
 
 
-
 function find_subtours(y_val::Dict, nodes_0, nodes)
     succ = Dict{Int,Int}()
     for ((i, j), v) in y_val
         v > 0.5 && (succ[i] = j)
     end
 
+    # Walk the depot chain, guarding against a missing successor.
     on_main_route = Set{Int}()
     if haskey(succ, 0)
         current = 0
         push!(on_main_route, current)
         for _ in 1:length(nodes_0)
+            haskey(succ, current) || break
             current = succ[current]
             current == 0 && break
             push!(on_main_route, current)
         end
     end
 
+    # Collect only genuinely closed cycles among the remaining nodes.
     subtours = Vector{Vector{Int}}()
     seen = Set{Int}()
     for i in nodes
         (i in on_main_route || i in seen || !haskey(succ, i)) && continue
-        cycle = Int[]
+        cycle  = Int[]
         current = i
+        closed = false
         for _ in 1:length(nodes_0)
             push!(cycle, current)
             push!(seen, current)
+            haskey(succ, current) || break
             current = succ[current]
-            current == i && break
+            if current == i
+                closed = true
+                break
+            end
         end
-        push!(subtours, cycle)
+        closed && push!(subtours, cycle)
     end
 
     return subtours
 end
 
-function eliminate_subtours!(model, y, A, nodes, nodes_0)
-    y_val = Dict(a => value(y[a]) for a in A)
+
+function combined_callback(cb_data)
+    # --- Subtour elimination ---
+    y_val = Dict(a => callback_value(cb_data, y[a]) for a in A)
     subtours = find_subtours(y_val, nodes_0, nodes)
-    isempty(subtours) && return false
-
-    println("\n=== SUBTOUR ELIMINATION ===")
     for S in subtours
-        @constraint(model,
+        con = @build_constraint(
             sum(y[(i, j)] for i in S, j in S if i != j) <= length(S) - 1)
-        println("  Subtour found and cut: ", S)
+        MOI.submit(model, MOI.LazyConstraint(cb_data), con)
+        println("   → Subtour cut: ", S)
     end
-    return true
-end
 
-
-function separate_plane(model, nodes, Z, Z_bar, mu,
-                        T_end::Float64, tolerance::Float64)
-    println("\n=== PLANE-CUT SEPARATION ===")
-    Z_bar_val = value.(Z_bar)
-    Z_val     = value.(Z)
-    mu_val    = value.(mu)
-    added     = false
+    # --- Plane cuts ---
+    Z_bar_val = callback_value.(cb_data, Z_bar)
+    Z_val     = callback_value.(cb_data, Z)
+    mu_val    = callback_value.(cb_data, mu)
 
     for i in nodes
-        w0    = max(0.0, Z_bar_val[i] - Z_val[i])
-        z0    = Z_val[i]
+        w0 = max(0.0, Z_bar_val[i] - Z_val[i])
+        z0 = Z_val[i]
 
-        f1    = w0  / (1.0 + w0)
-        f2    = 1.0 - 0.001 * (T_end - z0)^2   
+        f1    = w0 / (1.0 + w0)
+        f2    = 1.0 - 0.001 * (T_end - z0)^2
         h_val = f1 * f2
 
-        if h_val < mu_val[i] - tolerance
-            df_dw = f2 / (1.0 + w0)^2           
-            df_dz = f1 * 0.002 * (T_end - z0)   
+        if h_val < mu_val[i] - 1e-5
+            df_dw = f2 / (1.0 + w0)^2
+            df_dz = f1 * 0.002 * (T_end - z0)
 
-        
-            @constraint(model,
+            con = @build_constraint(
                 mu[i] <= h_val
                        + df_dw * ((Z_bar[i] - Z[i]) - w0)
                        + df_dz * (Z[i] - z0))
-
-            println("  Node $i — cut added")
-            println("    (w0, z0)  = ($(round(w0,digits=4)), $(round(z0,digits=4)))")
-            println("    h(w0,z0) = $(round(h_val, digits=6))",
-                    "  |  mu = $(round(mu_val[i],digits=6))",
-                    "  |  viol = $(round(mu_val[i]-h_val,digits=6))")
-            println("    dh/dw = $(round(df_dw,digits=6))",
-                    "  |  dh/dz = $(round(df_dz,digits=6))")
-            added = true
-        end
-    end
-    return added
-end
-
-let iteration = 0
-    while true
-        optimize!(model)
-        iteration += 1
-        println("\n=== Iteration $iteration ===")
-
-        status = termination_status(model)
-        if status != MOI.OPTIMAL && status != MOI.FEASIBLE_POINT
-            println("Solver status: $status — terminating.")
-            break
-        end
-
-        println("Objective = $(round(objective_value(model), digits=6))")
-
-        subtour_added = eliminate_subtours!(model, y, A, nodes, nodes_0)
-        plane_added   = separate_plane(model, nodes, Z, Z_bar, mu, T_end, 1e-4)
-
-        if !subtour_added && !plane_added
-            println("\nNo violated cuts — optimal solution found.")
-            break
+            MOI.submit(model, MOI.LazyConstraint(cb_data), con)
+            println("   → Plane cut for node $i (violation ≈ $(round(mu_val[i] - h_val, digits=6)))")
         end
     end
 end
+
+MOI.set(model, MOI.LazyConstraintCallback(), combined_callback)
+optimize!(model)
+
+println("\n=== Final Solution ===")
+status = termination_status(model)
+println("Status: $status")
 
 if primal_status(model) == MOI.FEASIBLE_POINT
     println("\nFinal objective : ", round(objective_value(model), digits=6))
