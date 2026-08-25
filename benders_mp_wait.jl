@@ -176,7 +176,7 @@ function build_and_solve()
     end
 
     set_attribute(m, MOI.LazyConstraintCallback(), benders_callback)
-    set_attribute(m, "TimeLimit", 120.0)     # safety stop for the demo
+    set_attribute(m, "TimeLimit", 3600.0)     # safety stop for the demo
     optimize!(m)
 
     return m, y, w, η, cuts[]
