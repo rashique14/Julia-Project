@@ -13,8 +13,8 @@ new_model() = Model(() -> Gurobi.Optimizer(GRB_ENV))
 # ======================================================================
 Random.seed!(90)
 
-const NODES     = 1:5
-const NODES0    = 0:5
+const NODES     = 1:15
+const NODES0    = 0:15
 const T_END     = 30.0
 const U_MAX     = 100.0
 const DWELL_MAX = 20.0        # cap on wait/dwell at a node (was Zbar - Z <= 20)
