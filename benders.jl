@@ -18,11 +18,11 @@ const NODES0 = 0:15
 const T_END  = 30.0
 const U_MAX  = 100.0
 
-coords = Dict(i => (10rand(), 10rand()) for i in NODES0)
-ARCS   = [(i, j) for i in NODES0 for j in NODES0 if i != j]
-travel = Dict((i, j) => hypot(coords[i][1] - coords[j][1],
-                              coords[i][2] - coords[j][2]) for (i, j) in ARCS)
-reward = Dict(i => 5.0 + 10rand() for i in NODES)
+const coords = Dict(i => (10rand(), 10rand()) for i in NODES0)
+const ARCS   = [(i, j) for i in NODES0 for j in NODES0 if i != j]
+const travel = Dict((i, j) => hypot(coords[i][1] - coords[j][1],
+                                    coords[i][2] - coords[j][2]) for (i, j) in ARCS)
+const reward = Dict(i => 5.0 + 10rand() for i in NODES)
 const TOTAL_REWARD = sum(values(reward))
 
 # ======================================================================
@@ -39,32 +39,70 @@ function reward_value_and_gradient(arrival, departure)
 end
 
 # ======================================================================
-# 3. SUBPROBLEM  —  for a FIXED route, best achievable timing + reward
-#    Returns (:optimal, value)  or  (:infeasible, 0.0)
+# 3. SUBPROBLEM  —  built ONCE, reused on every callback.
+#
+#    *** THIS IS THE MEMORY FIX ***
+#    The original code called new_model() inside EVERY callback
+#    invocation, creating a fresh Gurobi model each time.  A Gurobi model
+#    holds memory on the C side that Julia's garbage collector cannot
+#    see, so it is not reclaimed in time.  The lazy callback fires on
+#    every integer-feasible node (thousands of times with the weak
+#    no-good subtour cut), so those tiny models accumulate until the job
+#    is OOM-killed.
+#
+#    Instead we build the timing model a single time, keep the parts that
+#    never change, and on each call only swap out the route-specific
+#    constraints (arc precedences + outer-approximation cuts) and the
+#    per-node μ bounds.
 # ======================================================================
-function route_reward(active_arcs)
-    entered = Dict(i => any(j == i for (_, j) in active_arcs) for i in NODES)
-
+function make_subproblem()
     s = new_model(); set_silent(s)
     @variable(s, Z[NODES0]    >= 0)
     @variable(s, Zbar[NODES0] >= 0)
     @variable(s, 0 <= μ[i in NODES] <= 1)
 
+    # route-INDEPENDENT constraints (built once, never touched again)
     @constraint(s, Zbar[0] == 0)
     @constraint(s, Z[0] <= U_MAX)
-    for (i, j) in active_arcs
-        j != 0 && @constraint(s, Z[j] >= Zbar[i] + travel[(i, j)])
-        j == 0 && @constraint(s, Z[0] >= Zbar[i] + travel[(i, 0)])
-    end
-    @constraint(s, [i in NODES], Z[i] <= Zbar[i])
-    @constraint(s, [i in NODES], Zbar[i] <= T_END)
+    @constraint(s, [i in NODES], Z[i]           <= Zbar[i])
+    @constraint(s, [i in NODES], Zbar[i]        <= T_END)
     @constraint(s, [i in NODES], Zbar[i] - Z[i] <= 20)
-    @constraint(s, [i in NODES], Z[i] <= T_END)
-    @constraint(s, [i in NODES], μ[i] <= (entered[i] ? 1 : 0))
+    @constraint(s, [i in NODES], Z[i]           <= T_END)
 
     @objective(s, Max, sum(reward[i] * μ[i] for i in NODES))
+    return s, Z, Zbar, μ
+end
 
-    # outer-approximation loop for μ ≤ h(wait, arrival)
+const SUB, SUB_Z, SUB_Zbar, SUB_μ = make_subproblem()
+const SUB_DYN = Any[]      # route-specific constraints, wiped each call
+
+function route_reward(active_arcs)
+    s = SUB
+    Z, Zbar, μ = SUB_Z, SUB_Zbar, SUB_μ
+
+    # 1) drop the constraints that belonged to the previous route
+    for c in SUB_DYN
+        delete(s, c)
+    end
+    empty!(SUB_DYN)
+
+    entered = Dict(i => any(j == i for (_, j) in active_arcs) for i in NODES)
+
+    # 2) μ can only be positive at nodes that were actually visited
+    for i in NODES
+        set_upper_bound(μ[i], entered[i] ? 1.0 : 0.0)
+    end
+
+    # 3) arc-precedence (timing) constraints for THIS route
+    for (i, j) in active_arcs
+        if j != 0
+            push!(SUB_DYN, @constraint(s, Z[j] >= Zbar[i] + travel[(i, j)]))
+        else
+            push!(SUB_DYN, @constraint(s, Z[0] >= Zbar[i] + travel[(i, 0)]))
+        end
+    end
+
+    # 4) outer-approximation loop for μ ≤ h(wait, arrival)
     for _ in 1:50
         optimize!(s)
         termination_status(s) == MOI.OPTIMAL || return (:infeasible, 0.0)
@@ -79,9 +117,9 @@ function route_reward(active_arcs)
             entered[i] || continue
             g = reward_value_and_gradient(arr[i], dep[i])
             if mv[i] > g.h + 1e-6
-                @constraint(s, μ[i] <= g.h
+                push!(SUB_DYN, @constraint(s, μ[i] <= g.h
                     + g.dh_dwait * ((Zbar[i] - Z[i]) - g.wait)
-                    + g.dh_darr  * (Z[i] - arr[i]))
+                    + g.dh_darr  * (Z[i] - arr[i])))
                 added = true
             end
         end
@@ -134,6 +172,11 @@ function build_and_solve()
     end
 
     set_attribute(m, MOI.LazyConstraintCallback(), benders_callback)
+
+    # The subproblem model is now SHARED state, so the callback must not
+    # be run by several B&B threads at once.  Single-threaded keeps it
+    # correct and is plenty for a problem this size.
+    set_attribute(m, "Threads", 1)
     set_attribute(m, "TimeLimit", 3600.0)     # safety stop for the demo
     optimize!(m)
 
