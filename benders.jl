@@ -2,15 +2,9 @@ using JuMP, Gurobi
 import MathOptInterface as MOI
 using Random
 
-# ======================================================================
-# 0. ONE shared Gurobi environment  (prints the license banner just once)
-# ======================================================================
 const GRB_ENV = Gurobi.Env()
 new_model() = Model(() -> Gurobi.Optimizer(GRB_ENV))
 
-# ======================================================================
-# 1. DATA
-# ======================================================================
 Random.seed!(90)
 
 const NODES  = 1:12
@@ -25,9 +19,6 @@ const travel = Dict((i, j) => hypot(coords[i][1] - coords[j][1],
 const reward = Dict(i => 5.0 + 10rand() for i in NODES)
 const TOTAL_REWARD = sum(values(reward))
 
-# ======================================================================
-# 2. NONLINEAR REWARD  μ ≤ h(wait, arrival),  linearized by tangents
-# ======================================================================
 function reward_value_and_gradient(arrival, departure)
     wait = max(0.0, departure - arrival)
     f1   = wait / (1 + wait)
@@ -38,30 +29,12 @@ function reward_value_and_gradient(arrival, departure)
     return (h = h, dh_dwait = dh_dwait, dh_darr = dh_darr, wait = wait)
 end
 
-# ======================================================================
-# 3. SUBPROBLEM  —  built ONCE, reused on every callback.
-#
-#    *** THIS IS THE MEMORY FIX ***
-#    The original code called new_model() inside EVERY callback
-#    invocation, creating a fresh Gurobi model each time.  A Gurobi model
-#    holds memory on the C side that Julia's garbage collector cannot
-#    see, so it is not reclaimed in time.  The lazy callback fires on
-#    every integer-feasible node (thousands of times with the weak
-#    no-good subtour cut), so those tiny models accumulate until the job
-#    is OOM-killed.
-#
-#    Instead we build the timing model a single time, keep the parts that
-#    never change, and on each call only swap out the route-specific
-#    constraints (arc precedences + outer-approximation cuts) and the
-#    per-node μ bounds.
-# ======================================================================
 function make_subproblem()
     s = new_model(); set_silent(s)
     @variable(s, Z[NODES0]    >= 0)
     @variable(s, Zbar[NODES0] >= 0)
     @variable(s, 0 <= μ[i in NODES] <= 1)
 
-    # route-INDEPENDENT constraints (built once, never touched again)
     @constraint(s, Zbar[0] == 0)
     @constraint(s, Z[0] <= U_MAX)
     @constraint(s, [i in NODES], Z[i]           <= Zbar[i])
@@ -74,13 +47,12 @@ function make_subproblem()
 end
 
 const SUB, SUB_Z, SUB_Zbar, SUB_μ = make_subproblem()
-const SUB_DYN = Any[]      # route-specific constraints, wiped each call
+const SUB_DYN = Any[]
 
 function route_reward(active_arcs)
     s = SUB
     Z, Zbar, μ = SUB_Z, SUB_Zbar, SUB_μ
 
-    # 1) drop the constraints that belonged to the previous route
     for c in SUB_DYN
         delete(s, c)
     end
@@ -88,12 +60,10 @@ function route_reward(active_arcs)
 
     entered = Dict(i => any(j == i for (_, j) in active_arcs) for i in NODES)
 
-    # 2) μ can only be positive at nodes that were actually visited
     for i in NODES
         set_upper_bound(μ[i], entered[i] ? 1.0 : 0.0)
     end
 
-    # 3) arc-precedence (timing) constraints for THIS route
     for (i, j) in active_arcs
         if j != 0
             push!(SUB_DYN, @constraint(s, Z[j] >= Zbar[i] + travel[(i, j)]))
@@ -102,12 +72,10 @@ function route_reward(active_arcs)
         end
     end
 
-    # 4) outer-approximation loop for μ ≤ h(wait, arrival)
     for _ in 1:50
         optimize!(s)
         termination_status(s) == MOI.OPTIMAL || return (:infeasible, 0.0)
 
-        # read ALL values first, THEN add cuts (avoids OptimizeNotCalled)
         arr = Dict(i => value(Z[i])    for i in NODES if entered[i])
         dep = Dict(i => value(Zbar[i]) for i in NODES if entered[i])
         mv  = Dict(i => value(μ[i])    for i in NODES if entered[i])
@@ -128,11 +96,7 @@ function route_reward(active_arcs)
     return (:optimal, objective_value(s))
 end
 
-# ======================================================================
-# 4. MASTER  —  routing MILP, solved ONCE by Gurobi.
-#    A lazy callback plays the subproblem's role: whenever the tree
-#    produces an integer route, it checks the true reward and cuts.
-# ======================================================================
+
 function build_and_solve()
     m = new_model(); set_silent(m)
 
@@ -151,7 +115,6 @@ function build_and_solve()
 
     cuts = Ref(0)
     function benders_callback(cb_data)
-        # only act on integer-feasible candidates
         status = callback_node_status(cb_data, m)
         status == MOI.CALLBACK_NODE_STATUS_INTEGER || return
 
@@ -173,19 +136,13 @@ function build_and_solve()
 
     set_attribute(m, MOI.LazyConstraintCallback(), benders_callback)
 
-    # The subproblem model is now SHARED state, so the callback must not
-    # be run by several B&B threads at once.  Single-threaded keeps it
-    # correct and is plenty for a problem this size.
     set_attribute(m, "Threads", 1)
-    set_attribute(m, "TimeLimit", 3600.0)     # safety stop for the demo
+    set_attribute(m, "TimeLimit", 3600.0)     
     optimize!(m)
 
     return m, y, η, cuts[]
 end
 
-# ======================================================================
-# 5. RUN
-# ======================================================================
 function main()
     m, y, η, ncuts = build_and_solve()
 
