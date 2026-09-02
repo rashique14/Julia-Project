@@ -195,12 +195,15 @@ function main()
 
     if primal_status(m) == MOI.FEASIBLE_POINT
         println("Objective  : ", round(objective_value(m), digits=4))
+        println("Bound      : ", round(objective_bound(m), digits=4))
+        println("Gap        : ", round(100 * relative_gap(m), digits=4), " %")
         println("Route:")
         for a in ARCS
             value(y[a]) > 0.5 && println("  $(a[1]) -> $(a[2])")
         end
     else
         println("No feasible route found.")
+        println("Bound      : ", round(objective_bound(m), digits=4))
     end
 end
 
