@@ -28,7 +28,7 @@ using Random
 Random.seed!(90)
 
 # ------------------------------------------------------------------- instance
-const NNODES  = 8               # <- set to 8 for a quick sanity run
+const NNODES  = 15               # <- set to 8 for a quick sanity run
 const nodes   = 1:NNODES
 const nodes_0 = 0:NNODES
 const T_end   = 30.0
