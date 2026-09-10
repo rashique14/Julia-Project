@@ -7,7 +7,7 @@ new_model() = Model(() -> Gurobi.Optimizer(GRB_ENV))
 
 Random.seed!(90)
 
-const N      =    8             # <- set to 15 for the larger instance
+const N      =    12             # <- set to 15 for the larger instance
 const NODES  = 1:N
 const NODES0 = 0:N
 const T_END  = 30.0
