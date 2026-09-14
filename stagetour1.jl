@@ -1,0 +1,141 @@
+using JuMP, Gurobi
+import MathOptInterface as MOI
+using Random
+
+Random.seed!(90)
+
+nodes   = 1:15
+nodes_0 = 0:15
+Tmax    = length(nodes) + 1
+T_end   = 30.0
+U_max   = 100.0
+coords  = Dict(i => (10*rand(), 10*rand()) for i in nodes_0)
+
+A     = [(i,j) for i in nodes_0 for j in nodes_0 if i != j]
+A_ext = vcat(A, [(0,0)])
+
+α = Dict((i,j) => hypot(coords[i][1]-coords[j][1], coords[i][2]-coords[j][2]) for (i,j) in A)
+α[(0,0)] = 0.0
+
+Q = Dict(i => 5.0 + 10.0 * rand() for i in nodes)
+
+model = Model(Gurobi.Optimizer)
+
+@variable(model, x[(i,j) in A_ext, s in 1:Tmax], Bin)
+
+@constraint(model, one_arc_per_stage[s in 1:Tmax],
+    sum(x[(i,j), s] for (i,j) in A_ext) == 1)
+
+@constraint(model, must_depart,
+    sum(x[(0,j), 1] for j in nodes) == 1)
+
+@constraint(model, no_redeparture[j in nodes, s in 2:Tmax],
+    x[(0,j), s] == 0)
+
+@constraint(model, chain[k in nodes_0, s in 1:Tmax-1],
+    sum(x[(i,k), s] for i in nodes_0 if (i,k) in A_ext) ==
+    sum(x[(k,j), s+1] for j in nodes_0 if (k,j) in A_ext))
+
+@constraint(model, visit_once[j in nodes],
+    sum(x[(i,j), s] for s in 1:Tmax for i in nodes_0 if (i,j) in A_ext) <= 1)
+
+@constraint(model, real_return,
+    sum(x[(i,0), s] for s in 1:Tmax for i in nodes) == 1)
+
+@variable(model, Z[s in 1:Tmax]    >= 0)
+@variable(model, Zbar[s in 0:Tmax] >= 0)
+@constraint(model, Zbar[0] == 0)
+
+@constraint(model, propagate[s in 1:Tmax],
+    Z[s] == Zbar[s-1] + sum(α[(i,j)] * x[(i,j), s] for (i,j) in A_ext))
+
+@constraint(model, seq[s in 1:Tmax], Zbar[s] >= Z[s])
+@constraint(model, max_wait[s in 1:Tmax], Zbar[s] - Z[s] <= 20)
+
+@constraint(model, time_cap[s in 1:Tmax],
+    Z[s] <= T_end * sum(x[(i,j),s] for (i,j) in A_ext if j in nodes)
+          + U_max * sum(x[(i,0),s] for i in nodes_0 if (i,0) in A_ext))
+@constraint(model, depart_cap[s in 1:Tmax],
+    Zbar[s] <= T_end * sum(x[(i,j),s] for (i,j) in A_ext if j in nodes)
+             + U_max * sum(x[(i,0),s] for i in nodes_0 if (i,0) in A_ext))
+
+@variable(model, nu[s in 1:Tmax] >= 0)
+@constraint(model, nu_ub[s in 1:Tmax], nu[s] <= 1)
+
+@variable(model, mu_is[i in nodes, s in 1:Tmax] >= 0)
+@variable(model, mu[i in nodes] >= 0)
+@constraint(model, mu_ub[i in nodes], mu[i] <= 1)
+
+@constraint(model, cap_by_visit[i in nodes, s in 1:Tmax],
+    mu_is[i,s] <= sum(x[(k,i), s] for k in nodes_0 if (k,i) in A_ext))
+@constraint(model, cap_by_wait[i in nodes, s in 1:Tmax],
+    mu_is[i,s] <= nu[s])
+@constraint(model, total_reward[i in nodes],
+    mu[i] == sum(mu_is[i,s] for s in 1:Tmax))
+@constraint(model, nu_link[s in 1:Tmax],
+    nu[s] <= sum(x[(k,i),s] for i in nodes for k in nodes_0 if (k,i) in A_ext))
+
+@objective(model, Max, sum(Q[i] * mu[i] for i in nodes))
+
+const DEBUG_CUTS = false
+
+function plane_cut_callback(cb_data)
+    for s in 1:Tmax
+        z0 = callback_value(cb_data, Z[s])
+        w0 = max(0.0, callback_value(cb_data, Zbar[s]) - z0)
+        ν0 = callback_value(cb_data, nu[s])
+
+        f1 = w0 / (1.0 + w0)
+        f2 = 1.0 - 0.001 * (T_end - z0)^2
+        h  = f1 * f2
+
+        h < ν0 - 1e-3  || continue
+
+        df_dw = f2 / (1.0 + w0)^2
+        df_dz = f1 * 0.002 * (T_end - z0)
+
+        con = @build_constraint(
+            nu[s] <= h + df_dw*((Zbar[s]-Z[s]) - w0) + df_dz*(Z[s]-z0))
+        MOI.submit(model, MOI.LazyConstraint(cb_data), con)
+
+        DEBUG_CUTS && println("   → cut stage $s (viol ≈ $(round(ν0-h; digits=6)))")
+    end
+end
+
+MOI.set(model, MOI.LazyConstraintCallback(), plane_cut_callback)
+
+optimize!(model)
+
+println("\n=== Final Solution ===")
+status = termination_status(model)
+println("Status: $status")
+
+if primal_status(model) == MOI.FEASIBLE_POINT
+    println("Objective = $(round(objective_value(model), digits=6))")
+
+    active = sort(
+        [(i,j,s) for (i,j) in A_ext for s in 1:Tmax
+         if value(x[(i,j),s]) > 0.5 && (i,j) != (0,0)],
+        by = e -> e[3])
+
+    println("\nRoute:")
+    for (i,j,s) in active
+        println("  $i -> $j   (stage $s)")
+    end
+
+    println("\nNode details (visited only):")
+    for (i,j,s) in active
+        j == 0 && continue                 
+        w  = max(0.0, value(Zbar[s]) - value(Z[s]))
+        z  = value(Z[s])
+        f1 = w / (1.0 + w)
+        f2 = 1.0 - 0.001 * (T_end - z)^2
+        println("  Node $j:  arrive=$(round(z,digits=2))  ",
+                "depart=$(round(value(Zbar[s]),digits=2))  ",
+                "w=$(round(w,digits=2))  ",
+                "f1=$(round(f1,digits=4))  ",
+                "f2=$(round(f2,digits=4))  ",
+                "h=$(round(f1*f2,digits=4))  ",
+                "mu=$(round(value(mu[j]),digits=4))")
+    end
+end
