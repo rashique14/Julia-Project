@@ -54,10 +54,10 @@ model = Model(Gurobi.Optimizer)
 
 @constraint(model, time_cap[s in 1:Tmax],
     Z[s] <= T_end * sum(x[(i,j),s] for (i,j) in A_ext if j in nodes)
-          + U_max * sum(x[(i,0),s] for i in nodes_0 if (i,0) in A_ext))
+          + 50 * sum(x[(i,0),s] for i in nodes_0 if (i,0) in A_ext))
 @constraint(model, depart_cap[s in 1:Tmax],
     Zbar[s] <= T_end * sum(x[(i,j),s] for (i,j) in A_ext if j in nodes)
-             + U_max * sum(x[(i,0),s] for i in nodes_0 if (i,0) in A_ext))
+             + 50 * sum(x[(i,0),s] for i in nodes_0 if (i,0) in A_ext))
 
 @variable(model, nu[s in 1:Tmax] >= 0)
 @constraint(model, nu_ub[s in 1:Tmax], nu[s] <= 1)
