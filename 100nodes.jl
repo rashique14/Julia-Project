@@ -22,7 +22,7 @@ using Random
 Random.seed!(90)
 
 # ---------- instance ----------
-N       = 3002828, 3008579, 3015046-P, 3016790-S                      # candidate customer nodes (was 5)
+N       = 3002828, 3008579, 3015046-P, 3016790-S, 3716505-G                     # candidate customer nodes (was 5)
 nodes   = 1:N
 nodes_0 = 0:N
 T_end   = 30.0
