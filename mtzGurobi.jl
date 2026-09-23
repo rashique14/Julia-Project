@@ -3,8 +3,8 @@ import MathOptInterface as MOI
 using Random
 
 Random.seed!(90)
-nodes   = 1:8
-nodes_0 = 0:8
+nodes   = 1:15
+nodes_0 = 0:15
 T_end   = 30.0
 coords  = Dict(i => (10*rand(), 10*rand()) for i in nodes_0)
 
